@@ -1,151 +1,111 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
-import math
-from pathlib import Path
+import plotly.express as px
+from datetime import date, timedelta
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
+st.set_page_config(page_title="Stock Comparison Dashboard - CPS 5745", layout="wide")
+
+st.title("Interactive Stock Comparison Dashboard")
+st.markdown("**Author:** Karanpreet Singh | **Developed for CPS 5745**")
+
+# Shared Filters
+st.sidebar.header("Shared Filters")
+default_tickers = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN"]
+selected_tickers = st.sidebar.multiselect(
+    "Select Companies (at least 3):",
+    options=default_tickers,
+    default=["AAPL", "MSFT", "NVDA"]
 )
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+start_date = st.sidebar.date_input("Start Date", value=date.today() - timedelta(days=365))
+end_date = st.sidebar.date_input("End Date", value=date.today())
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+if len(selected_tickers) < 3:
+    st.warning("Please select at least 3 companies to compare.")
+    st.stop()
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+if start_date >= end_date:
+    st.warning("Start Date must be before End Date.")
+    st.stop()
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+@st.cache_data(ttl="1h")
+def load_data(tickers, start, end):
+    frames = []
+    for t in tickers:
+        df = yf.download(t, start=start, end=end, progress=False, auto_adjust=True)
+        if not df.empty:
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            df = df.reset_index()
+            df["Company"] = t
+            df["Daily Return (%)"] = df["Close"].pct_change() * 100
+            df["Normalized Price (Base 100)"] = (df["Close"] / df["Close"].iloc[0]) * 100
+            frames.append(df)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+data = load_data(selected_tickers, start_date, end_date)
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+if data.empty:
+    st.error("No price data returned for the selected companies and dates. Try a wider date range.")
+    st.stop()
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
-
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
+# 1. Normalized Stock Price Trend (Line Chart)
+fig1 = px.line(
+    data, x="Date", y="Normalized Price (Base 100)", color="Company",
+    title="1. Normalized Stock Price Comparison (Base = 100)",
+    labels={"Normalized Price (Base 100)": "Normalized Price Index (Base 100)", "Date": "Date"}
 )
 
-''
-''
+# 2. Trading Volume Over Time (Grouped Bar Chart)
+monthly_vol = data.copy()
+monthly_vol["Month"] = monthly_vol["Date"].dt.to_period("M").astype(str)
+vol_summary = monthly_vol.groupby(["Month", "Company"], as_index=False)["Volume"].mean()
+fig2 = px.bar(
+    vol_summary, x="Month", y="Volume", color="Company", barmode="group",
+    title="2. Average Daily Trading Volume by Month (Shares)",
+    labels={"Volume": "Average Volume (Shares)", "Month": "Month"}
+)
 
+# 3. Daily Return Volatility Distribution (Box Plot)
+fig3 = px.box(
+    data.dropna(subset=["Daily Return (%)"]), x="Company", y="Daily Return (%)", color="Company",
+    title="3. Daily Return Volatility Distribution (%)",
+    labels={"Daily Return (%)": "Daily Return (%)"}
+)
 
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
+# 4. Closing Price vs. Trading Volume (Scatter Plot)
+fig4 = px.scatter(
+    data, x="Volume", y="Close", color="Company", opacity=0.7,
+    title="4. Closing Price (USD) vs. Daily Trading Volume (Shares)",
+    labels={"Volume": "Daily Volume (Shares)", "Close": "Closing Price (USD)"}
+)
 
-st.header(f'GDP in {to_year}', divider='gray')
+# 5. Cumulative Return Comparison (Horizontal Bar Chart)
+cum_returns = data.groupby("Company")["Close"].agg(
+    lambda c: (c.iloc[-1] - c.iloc[0]) / c.iloc[0] * 100
+).reset_index(name="Cumulative Return (%)")
+fig5 = px.bar(
+    cum_returns.sort_values("Cumulative Return (%)"),
+    x="Cumulative Return (%)", y="Company", color="Company", orientation="h",
+    title="5. Total Cumulative Return Over Selected Period (%)",
+    labels={"Cumulative Return (%)": "Total Return (%)"}
+)
 
-''
+col1, col2 = st.columns(2)
+with col1:
+    st.plotly_chart(fig1, width="stretch")
+    st.plotly_chart(fig3, width="stretch")
+with col2:
+    st.plotly_chart(fig2, width="stretch")
+    st.plotly_chart(fig4, width="stretch")
 
-cols = st.columns(4)
+st.plotly_chart(fig5, width="stretch")
 
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+st.subheader("Key Differences Revealed by the Visualizations")
+st.write(
+    "Across the selected date range, the normalized price chart and cumulative return bar chart reveal which company "
+    "delivered the strongest relative capital appreciation regardless of absolute share price differences. "
+    "The box plot highlights differences in risk and daily return dispersion, while the volume bar and scatter charts "
+    "illustrate liquidity differences and how trading activity correlates with price levels across the selected companies."
+)
